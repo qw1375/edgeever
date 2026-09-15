@@ -2,7 +2,10 @@ import { useRef, useState, useEffect, useCallback, useMemo, lazy, Suspense, type
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
+import StarterKit from "@tiptap/starter-kit";
+import { TaskItem, TaskList } from "@tiptap/extension-list";
 import Placeholder from "@tiptap/extension-placeholder";
+import { TableKit } from "@tiptap/extension-table";
 import { useTranslation } from "react-i18next";
 import * as m from "motion/react-m";
 import "katex/dist/katex.min.css";
@@ -99,7 +102,7 @@ import { sanitizeAndScopeCss } from "@/lib/css-sandbox";
 import { RevisionHistoryDialog } from "./dialogs/RevisionHistoryDialog";
 import { ExternalLinkDialog } from "./dialogs/ExternalLinkDialog";
 import { memoShareQueryKey, ShareMemoDialog } from "./dialogs/ShareMemoDialog";
-import { ShareNoteImageDialog } from "./dialogs/ShareNoteImageDialog";
+import { ShareNoteImageDialog, type ShareNoteImageSource } from "./dialogs/ShareNoteImageDialog";
 import { AiAssistantDialog, type AiAssistantAnchor } from "./dialogs/AiAssistantDialog";
 import { api } from "@/lib/api";
 import { isDesktopResourceRuntime, stageDesktopResource, toDesktopResourceDownloadUrl, toDesktopResourceUrl } from "@/lib/desktop-resources";
@@ -107,10 +110,10 @@ import { cn, formatDateTime, parseTagsText } from "@/lib/utils";
 import { EDITOR_CONTENT_MAX_WIDTH, EDITOR_CONTENT_MAX_WIDTH_COLLAPSED } from "@/lib/workspace-ui";
 import {
   countMemoCharacters,
-  createEdgeEverDocumentExtensions,
   docToMarkdown,
   MEMO_CONTENT_STYLE,
   markdownToDoc,
+  MergeDivider,
   normalizeImageGalleries,
   PLUGIN_EMBED_NODE_TYPE,
   pluginEmbedToMarkdown,
@@ -130,9 +133,13 @@ import { createEdgeEverMathematics } from "@edgeever/shared/mathematics";
 import { codeBlockLowlight, EdgeEverCodeBlock } from "@/lib/code-block";
 import { compressImageForUpload } from "@/lib/image-compression";
 import { LOCAL_DATABASE_INTERRUPTED_EVENT, localDb, selectNewestLocalDraft, type MemoUpdateSyncPayload } from "@/lib/local-db";
+import { LocalDatabaseUnavailableError } from "@/lib/local-database-recovery";
 import { persistEmergencyDraft, readEmergencyDraft, removeEmergencyDraft } from "@/lib/emergency-draft";
-import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate } from "@/lib/sync-queue";
+import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate, shouldQueueMemoSaveError } from "@/lib/sync-queue";
 import {
+  formatLocalDraftClipboardText,
+  formatMemoSaveConflictReason,
+  getMemoSaveConflictInfo,
   getMemoSaveConflictInfoFromQueueItem,
 } from "@/lib/memo-save-conflict";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -154,9 +161,15 @@ import {
   type MemoDocumentActionRequest,
   type ShortcutSettings,
 } from "@/lib/app-helpers";
+import { copyEditorToWeChat, copyMarkdownToWeChat } from "@/lib/wechat-copy";
 import { isPaperEditorTheme, publishEditorCssVars, resolvePaperEditorTheme } from "@/lib/publish-layout";
 import { ThemeBlock } from "./ThemeBlock";
 import { EditorPhonePreview, PhonePreviewGlyph } from "./EditorPhonePreview";
+import { downloadMarkdownFile } from "@/lib/note-markdown-export";
+import { NOTE_HTML_FULL_STYLES } from "@/lib/note-html-export-assets";
+import { downloadNoteHtmlFile, getHtmlImageEmbedNoticeKind } from "@/lib/note-html-export";
+import { openNotePrintPreview, serializeNoteDocumentForPrint } from "@/lib/note-print";
+import type { NoteImageFormat } from "@/lib/note-image-export";
 import {
   applyPlainTextTab,
   getAiSlashCommandStart,
@@ -168,6 +181,7 @@ import {
   AI_SPACE_SHORTCUT_CHANGED_EVENT,
   readAiSpaceShortcutPreference,
 } from "@/lib/ai-space-shortcut-preference";
+import { isBrowserOffline } from "@/lib/network-status";
 import {
   EDITOR_LINK_OPEN_MODE_CHANGED_EVENT,
   getStoredEditorLinkOpenMode,
@@ -216,10 +230,6 @@ import { createInlineFieldExtension } from "./editor/InlineField";
 import { createPluginEmbedExtension } from "./editor/PluginEmbed";
 import { getEditorScrollProgress, restoreEditorScrollProgress } from "./editor/editor-mode-scroll";
 import { useEditorSaveStatus } from "./editor/useEditorSaveStatus";
-import { getEditorSaveChrome } from "./editor/editor-save-chrome";
-import { classifyEditorSaveFailure, shouldLeaveEditorAfterSaveError } from "./editor/editor-save-failure";
-import { useEditorSaveConflictActions } from "./editor/useEditorSaveConflictActions";
-import { useEditorDocumentActions } from "./editor/useEditorDocumentActions";
 import { useEditorNoteSearchController } from "./editor/useEditorNoteSearchController";
 import { EditorNoteLinkPicker } from "./editor/EditorNoteLinkPicker";
 import { EditorResourceDialogs } from "./editor/EditorResourceDialogs";
@@ -236,11 +246,6 @@ import {
   resolveEditorDraftState,
   shouldReplaceEditorDocument,
 } from "./editor/editor-draft-state";
-import {
-  pendingEditorInsertMatchesMemo,
-  shouldInsertPendingEditorFiles,
-  usablePendingInsertFiles,
-} from "./editor/editor-pending-insert";
 import type { EdgeEverPluginHost, PluginEditorAdapter } from "@/lib/plugins/plugin-host";
 import {
   useEditorResourceActions,
@@ -249,26 +254,161 @@ import {
   type ResourceMenuTarget,
 } from "./editor/useEditorResourceActions";
 import { removeAttachmentAt, renameAttachmentAt } from "./editor/attachment-editor-range";
-import {
-  createLocalEditSession,
-  focusMobilePlainTextElement,
-  getEditorNavigableLinkFromEventTarget,
-  getMobilePlainTextElementValue,
-  getNoteLinkFromEventTarget,
-  getNoteLinkHintPosition,
-  getResourceFilesFromDataTransfer,
-  isEditorReady,
-  MemoSaveRequestError,
-  MOBILE_DRAFT_PERSIST_DELAY_MS,
-  MOBILE_EDITOR_QUERY,
-  requiresLocalEditSession,
-  setMobilePlainTextElementValue,
-  SUPPORTED_PASTE_IMAGE_TYPES,
-  syncStatusToSaveState,
-  type AiInsertionTarget,
-  type AiSelectionContext,
-  type MobilePlainTextElement,
-} from "./editor/editor-pane-helpers";
+
+const SUPPORTED_PASTE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+const MOBILE_EDITOR_QUERY = "(max-width: 639px)";
+const MOBILE_DRAFT_PERSIST_DELAY_MS = 800;
+
+const createLocalEditSession = (memo: MemoDetail): MemoEditSession => ({
+  id: `local-edit:${memo.id}`,
+  memoId: memo.id,
+  baseRevision: memo.revision,
+  baseContentHash: memo.contentHash,
+  expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+});
+
+const requiresLocalEditSession = (memo: MemoDetail) =>
+  isDesktopResourceRuntime() ||
+  isLocalMemoId(memo.id) ||
+  isBrowserOffline();
+
+type AiSelectionContext = {
+  kind: "markdown" | "plain";
+  from: number;
+  to: number;
+  contentMarkdown: string;
+} | {
+  kind: "rich";
+  from: number;
+  to: number;
+  contentMarkdown: string;
+  isInline: boolean;
+};
+
+type AiInsertionTarget = {
+  kind: "markdown" | "plain" | "rich";
+  position: number;
+};
+
+const getNoteLinkFromEventTarget = (target: EventTarget | null) =>
+  target instanceof Element
+    ? target.closest<HTMLAnchorElement>('a.edgeever-note-link, a[href^="#memo="]')
+    : null;
+
+/** Any navigable editor link (external or note). Attachment chips have their own menu. */
+const getEditorNavigableLinkFromEventTarget = (target: EventTarget | null) => {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+
+  const link = target.closest<HTMLAnchorElement>("a[href]");
+  if (!link || getAttachmentLinkFromEventTarget(link)) {
+    return null;
+  }
+
+  return link;
+};
+
+const getNoteLinkHintPosition = (link: HTMLAnchorElement): NoteLinkHintPosition => {
+  const rect = link.getBoundingClientRect();
+  const placement = rect.top < 48 ? "below" : "above";
+
+  return {
+    left: Math.min(Math.max(rect.left + rect.width / 2, 12), window.innerWidth - 12),
+    top: placement === "above" ? rect.top - 8 : rect.bottom + 8,
+    placement,
+  };
+};
+
+type MobilePlainTextElement = HTMLTextAreaElement | HTMLDivElement;
+
+const isEditorReady = (editor: Editor | null | undefined): editor is Editor =>
+  Boolean(editor && !editor.isDestroyed && (editor as { extensionManager?: unknown }).extensionManager);
+
+const getMobilePlainTextElementValue = (element: MobilePlainTextElement | null) => {
+  if (!element) {
+    return "";
+  }
+
+  return "value" in element ? element.value : element.innerText;
+};
+
+const setMobilePlainTextElementValue = (element: MobilePlainTextElement | null, value: string) => {
+  if (!element) {
+    return;
+  }
+
+  if ("value" in element) {
+    element.value = value;
+    return;
+  }
+
+  if (element.innerText !== value) {
+    element.textContent = value;
+  }
+};
+
+const focusMobilePlainTextElement = (element: MobilePlainTextElement | null) => {
+  if (!element) {
+    return;
+  }
+
+  element.focus({ preventScroll: true });
+
+  if ("setSelectionRange" in element) {
+    element.setSelectionRange(element.value.length, element.value.length);
+    return;
+  }
+
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return;
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+};
+
+const getResourceFilesFromDataTransfer = (dataTransfer: DataTransfer | null) => {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const fileItems = Array.from(dataTransfer.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  const files = fileItems.length > 0 ? fileItems : Array.from(dataTransfer.files ?? []);
+
+  return files.filter((file) => file.size > 0);
+};
+
+const syncStatusToSaveState = (status: "pending" | "syncing" | "conflict" | "error") => {
+  if (status === "conflict") {
+    return "conflict";
+  }
+  if (status === "syncing") {
+    return "saving";
+  }
+  return "queued";
+};
+
+class MemoSaveRequestError extends Error {
+  originalError: unknown;
+  payload: MemoUpdateSyncPayload;
+  tagsText: string;
+
+  constructor(originalError: unknown, payload: MemoUpdateSyncPayload, tagsText: string) {
+    super(originalError instanceof Error ? originalError.message : "Memo save failed");
+    this.name = "MemoSaveRequestError";
+    this.originalError = originalError;
+    this.payload = payload;
+    this.tagsText = tagsText;
+  }
+}
 
 type EditorPaneProps = {
   memo: MemoDetail | null;
@@ -407,6 +547,8 @@ const RichEditorPane = ({
     setSaveConflictInfo,
     setSaveState,
   } = useEditorSaveStatus();
+  const [conflictActionPending, setConflictActionPending] = useState<"adopt" | "copy" | null>(null);
+  const [conflictActionMessage, setConflictActionMessage] = useState<string | null>(null);
   const [storageSaveError, setStorageSaveError] = useState(false);
   const [hydratedEditorMemoId, setHydratedEditorMemoId] = useState<string | null>(null);
 
@@ -418,6 +560,9 @@ const RichEditorPane = ({
   const [imageUploadState, setImageUploadState] = useState<"idle" | "compressing" | "uploading" | "error">("idle");
   const [imagePreview, setImagePreview] = useState<ImagePreviewRequestDetail | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [imageShareOpen, setImageShareOpen] = useState(false);
+  const [imageShareSource, setImageShareSource] = useState<ShareNoteImageSource | null>(null);
   const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
   const [aiAssistantAnchor, setAiAssistantAnchor] = useState<AiAssistantAnchor>({ left: 24, placement: "below", top: 96 });
   const aiBubbleMenu = useAiBubbleMenu(aiAssistantOpen);
@@ -469,6 +614,7 @@ const RichEditorPane = ({
   const [mobileToolbarOpen, setMobileToolbarOpen] = useState(false);
   const [editorOutlineCollapsed, setEditorOutlineCollapsed] = useState(readEditorOutlineCollapsedPreference);
   const [phonePreviewOpen, setPhonePreviewOpen] = useState(readEditorPhonePreviewPreference);
+  const [wechatCopyState, setWechatCopyState] = useState<"idle" | "copying" | "copied" | "error">("idle");
   const [memoIdCopyNotice, setMemoIdCopyNotice] = useState<{ status: "copied" | "error"; id: string } | null>(null);
   const handledSaveAndSyncTokenRef = useRef(saveAndSyncToken);
   const handledReadingProtectionToggleTokenRef = useRef(readingProtectionToggleToken);
@@ -851,7 +997,7 @@ const RichEditorPane = ({
     const currentEditor = editorRef.current;
 
     if (!currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
-      return false;
+      return;
     }
 
     const targetMemoId = currentMemo.id;
@@ -1025,32 +1171,36 @@ const RichEditorPane = ({
         removeImageUploadPlaceholder(placeholderEditor, placeholder);
       });
     });
-    return true;
   }, [queryClient, repository, resourceInsertionLimit, t]);
 
   const pluginEmbedExtension = useMemo(() => createPluginEmbedExtension(pluginHost), [pluginHost]);
   const inlineFieldExtension = useMemo(() => createInlineFieldExtension(i18n.language), [i18n.language]);
   const editor = useEditor({
     extensions: [
-      ...createEdgeEverDocumentExtensions({
-        mathematics: createEdgeEverMathematics(),
-        starterKit: { codeBlock: false, link: false },
-        image: false,
-        gallery: EditableImageGallery,
-        pdf: PdfAttachment,
-        file: FileAttachment,
-        pluginEmbed: pluginEmbedExtension,
-        table: { table: { renderWrapper: true } },
+      StarterKit.configure({
+        codeBlock: false,
+        link: false,
       }),
       EdgeEverLink.configure({ openOnClick: false }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
       inlineFieldExtension,
       EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
+      MergeDivider,
+      pluginEmbedExtension,
+      PdfAttachment,
+      FileAttachment,
+      ...createEdgeEverMathematics(),
       ThemeBlock,
+      EditableImageGallery,
       ResizableImage.configure({
         allowBase64: false,
         inline: false,
       }),
       ImageUploadPlaceholderExtension,
+      TableKit.configure({
+        table: { renderWrapper: true },
+      }),
       Placeholder.configure({
         placeholder: () => aiSpaceShortcutEnabledRef.current
           ? t("editor.placeholder")
@@ -1607,40 +1757,12 @@ const RichEditorPane = ({
   }, [editor]);
 
   useEffect(() => {
-    if (!pendingInsertFiles || !pendingEditorInsertMatchesMemo(
-      pendingInsertFiles,
-      memo?.id,
-      editorInstanceMemoIdentityRef.current.aliases,
-    )) return;
-    const files = usablePendingInsertFiles(pendingInsertFiles);
-    if (files.length === 0) {
-      onPendingInsertFilesConsumed?.();
-      return;
-    }
-    if (!shouldInsertPendingEditorFiles({
-      pendingInsertFiles,
-      memoId: memo?.id,
-      memoAliases: editorInstanceMemoIdentityRef.current.aliases,
-      editorHydratedForMemo: editorIsHydratedForCurrentMemo,
-      editorReady: isEditorReady(editor),
-      readOnly: effectiveReadOnly,
-    }) || !isEditorReady(editor)) return;
-    // Hydration leaves the editor non-editable until a later effect calls
-    // setEditable. That later effect does not re-render, so waiting on
-    // editor.isEditable here would drop the screenshot forever.
-    if (!editor.isEditable) editor.setEditable(true);
-    if (!insertResourceFiles(files)) return;
+    if (!pendingInsertFiles || pendingInsertFiles.memoId !== memo?.id) return;
+    if (hydratedEditorMemoId !== memo.id) return;
+    if (!isEditorReady(editor) || !editor.isEditable || pendingInsertFiles.files.length === 0) return;
+    insertResourceFiles(pendingInsertFiles.files);
     onPendingInsertFilesConsumed?.();
-  }, [
-    editor,
-    editorIsHydratedForCurrentMemo,
-    effectiveReadOnly,
-    hydratedEditorMemoId,
-    insertResourceFiles,
-    memo?.id,
-    onPendingInsertFilesConsumed,
-    pendingInsertFiles,
-  ]);
+  }, [editor, hydratedEditorMemoId, insertResourceFiles, memo?.id, onPendingInsertFilesConsumed, pendingInsertFiles]);
 
   useEffect(() => {
     if (!isEditorReady(editor)) {
@@ -2461,35 +2583,25 @@ const RichEditorPane = ({
     markDirty();
   }, [markDirty]);
 
-  const {
-    handleCopyToWeChat,
-    handleExportHtml,
-    handleExportMarkdown,
-    handleExportPdf,
-    handleOpenImageShare,
-    handleSaveAsTemplate,
-    imageShareOpen,
-    imageShareSource,
-    setImageShareOpen,
-    setShareOpen,
-    shareOpen,
-    wechatCopyState,
-  } = useEditorDocumentActions({
-    documentActionRequest,
-    editor,
-    effectiveReadOnly,
-    getMobilePlainTextValue,
-    hydratedEditorMemoId,
-    markdownSource,
-    memo,
-    notebookName: notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? "",
-    onDocumentActionConsumed,
-    onSaveAsTemplate,
-    tagsText,
-    title,
-    useMarkdownSourceEditor,
-    useMobilePlainTextEditor,
-  });
+  const handleCopyToWeChat = useCallback(async () => {
+    if (!isEditorReady(editor)) {
+      return;
+    }
+
+    setWechatCopyState("copying");
+    try {
+      if (useMarkdownSourceEditor) {
+        await copyMarkdownToWeChat(markdownSource);
+      } else {
+        await copyEditorToWeChat(editor);
+      }
+      setWechatCopyState("copied");
+      window.setTimeout(() => setWechatCopyState("idle"), 2200);
+    } catch {
+      setWechatCopyState("error");
+      window.setTimeout(() => setWechatCopyState("idle"), 2600);
+    }
+  }, [editor, markdownSource, useMarkdownSourceEditor]);
 
   const handleCopyMemoId = useCallback(async () => {
     if (!memo || isLocalMemoId(memo.id)) {
@@ -2499,6 +2611,253 @@ const RichEditorPane = ({
     setMemoIdCopyNotice({ status: copied ? "copied" : "error", id: memo.id });
     window.setTimeout(() => setMemoIdCopyNotice(null), copied ? 2200 : 3000);
   }, [memo]);
+
+  const handleExportPdf = useCallback((preopenedWindow?: Window | null) => {
+    if (!isEditorReady(editor) || !memo) {
+      return;
+    }
+
+    if (preopenedWindow === null) {
+      window.alert(t("editor.pdfExport.popupBlocked"));
+      return;
+    }
+
+    const currentDocument = useMobilePlainTextEditor
+      ? markdownToDoc(getMobilePlainTextValue())
+      : useMarkdownSourceEditor
+        ? markdownToDoc(markdownSource)
+        : editor.getJSON() as TiptapDoc;
+    const html = serializeNoteDocumentForPrint(editor, currentDocument);
+    const opened = openNotePrintPreview(
+      {
+        title: title.trim() || t("common.untitledMemo"),
+        notebook: notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? "",
+        tags: parseTagsText(tagsText),
+        updatedAt: formatDateTime(memo.updatedAt),
+        html,
+        language: i18n.resolvedLanguage ?? i18n.language,
+        labels: {
+          close: t("editor.pdfExport.close"),
+          error: t("editor.pdfExport.error"),
+          hint: t("editor.pdfExport.hint"),
+          preparing: t("editor.pdfExport.preparing"),
+          print: t("editor.pdfExport.print"),
+          ready: t("editor.pdfExport.ready"),
+        },
+      },
+      preopenedWindow ?? undefined,
+    );
+
+    if (!opened) {
+      window.alert(t("editor.pdfExport.popupBlocked"));
+    }
+  }, [
+    editor,
+    getMobilePlainTextValue,
+    i18n.language,
+    i18n.resolvedLanguage,
+      markdownSource,
+      markDirtyStatus,
+    memo,
+    notebookOptions,
+    t,
+    tagsText,
+    title,
+    useMarkdownSourceEditor,
+    useMobilePlainTextEditor,
+  ]);
+
+  const handleExportMarkdown = useCallback(() => {
+    if (!isEditorReady(editor) || !memo) {
+      return;
+    }
+
+    const markdown = useMobilePlainTextEditor
+      ? getMobilePlainTextValue()
+      : useMarkdownSourceEditor
+        ? markdownSource
+        : docToMarkdown(editor.getJSON() as TiptapDoc);
+    downloadMarkdownFile(
+      markdown,
+      title,
+      t("common.untitledMemo")
+    );
+  }, [
+    editor,
+    getMobilePlainTextValue,
+    markdownSource,
+    memo,
+    t,
+    title,
+    useMarkdownSourceEditor,
+    useMobilePlainTextEditor,
+  ]);
+
+  const handleExportHtml = useCallback(async () => {
+    if (!isEditorReady(editor) || !memo) {
+      return;
+    }
+
+    const currentDocument = useMobilePlainTextEditor
+      ? markdownToDoc(getMobilePlainTextValue())
+      : useMarkdownSourceEditor
+        ? markdownToDoc(markdownSource)
+        : editor.getJSON() as TiptapDoc;
+    const bodyHtml = serializeNoteDocumentForPrint(editor, currentDocument);
+
+    try {
+      const { images } = await downloadNoteHtmlFile({
+        bodyHtml,
+        title: title.trim() || t("common.untitledMemo"),
+        notebook: notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? "",
+        tags: parseTagsText(tagsText),
+        updatedAt: formatDateTime(memo.updatedAt),
+        language: i18n.resolvedLanguage ?? i18n.language,
+        fallbackTitle: t("common.untitledMemo"),
+        styles: NOTE_HTML_FULL_STYLES,
+      });
+
+      const noticeKind = getHtmlImageEmbedNoticeKind(images);
+      if (noticeKind === "partial") {
+        window.alert(t("editor.htmlExport.imageEmbedPartial", {
+          embedded: images.embedded,
+          total: images.total,
+          failed: images.failed,
+        }));
+      } else if (noticeKind === "failed-all") {
+        window.alert(t("editor.htmlExport.imageEmbedFailed", {
+          total: images.total,
+        }));
+      }
+    } catch {
+      window.alert(t("editor.htmlExport.error"));
+    }
+  }, [
+    editor,
+    getMobilePlainTextValue,
+    i18n.language,
+    i18n.resolvedLanguage,
+    markdownSource,
+    memo,
+    notebookOptions,
+    t,
+    tagsText,
+    title,
+    useMarkdownSourceEditor,
+    useMobilePlainTextEditor,
+  ]);
+
+  const buildImageExportOptions = useCallback((format: NoteImageFormat) => {
+    if (!isEditorReady(editor) || !memo) return;
+    const currentDocument = useMobilePlainTextEditor
+      ? markdownToDoc(getMobilePlainTextValue())
+      : useMarkdownSourceEditor
+        ? markdownToDoc(markdownSource)
+        : editor.getJSON() as TiptapDoc;
+    return {
+      bodyHtml: serializeNoteDocumentForPrint(editor, currentDocument),
+      title: title.trim() || t("common.untitledMemo"),
+      notebook: notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? "",
+      tags: parseTagsText(tagsText),
+      updatedAt: formatDateTime(memo.updatedAt),
+      language: i18n.resolvedLanguage ?? i18n.language,
+      fallbackTitle: t("common.untitledMemo"),
+      format,
+      styles: NOTE_HTML_FULL_STYLES,
+    };
+  }, [
+    editor,
+    getMobilePlainTextValue,
+    i18n.language,
+    i18n.resolvedLanguage,
+    markdownSource,
+    memo,
+    notebookOptions,
+    t,
+    tagsText,
+    title,
+    useMarkdownSourceEditor,
+    useMobilePlainTextEditor,
+  ]);
+
+  const handleOpenImageShare = useCallback(() => {
+    const options = buildImageExportOptions("png");
+    if (!options) return;
+    const { format: _format, ...source } = options;
+    setImageShareSource(source);
+    setImageShareOpen(true);
+  }, [buildImageExportOptions]);
+
+  const handleSaveAsTemplate = useCallback(() => {
+    if (!memo || effectiveReadOnly) {
+      return;
+    }
+
+    const name = window.prompt(t("templates.templateNamePrompt"), memo.title || "");
+    if (!name?.trim()) {
+      return;
+    }
+
+    const currentMarkdown = useMobilePlainTextEditor
+      ? getMobilePlainTextValue()
+      : isEditorReady(editor)
+        ? docToMarkdown(editor.getJSON() as TiptapDoc)
+        : memo.contentMarkdown;
+    const currentTemplateMemo: MemoDetail = {
+      ...memo,
+      title,
+      tags: parseTagsText(tagsText),
+      contentJson: markdownToDoc(currentMarkdown),
+      contentMarkdown: currentMarkdown,
+    };
+    void onSaveAsTemplate(currentTemplateMemo, name.trim());
+  }, [editor, effectiveReadOnly, getMobilePlainTextValue, memo, onSaveAsTemplate, t, tagsText, title, useMobilePlainTextEditor]);
+
+  useEffect(() => {
+    if (
+      !documentActionRequest ||
+      documentActionRequest.memoId !== memo?.id ||
+      hydratedEditorMemoId !== memo.id ||
+      !isEditorReady(editor)
+    ) {
+      return;
+    }
+
+    onDocumentActionConsumed?.(documentActionRequest.id);
+
+    switch (documentActionRequest.action) {
+      case "share":
+        if (!effectiveReadOnly) setShareOpen(true);
+        break;
+      case "export-markdown":
+        handleExportMarkdown();
+        break;
+      case "export-html":
+        void handleExportHtml();
+        break;
+      case "export-pdf":
+        handleExportPdf(documentActionRequest.printWindow);
+        break;
+      case "share-image":
+        handleOpenImageShare();
+        break;
+      case "save-as-template":
+        handleSaveAsTemplate();
+        break;
+    }
+  }, [
+    documentActionRequest,
+    editor,
+    effectiveReadOnly,
+    handleExportHtml,
+    handleExportMarkdown,
+    handleExportPdf,
+    handleOpenImageShare,
+    handleSaveAsTemplate,
+    hydratedEditorMemoId,
+    memo,
+    onDocumentActionConsumed,
+  ]);
 
   useEffect(() => {
     if (!useMobilePlainTextEditor) {
@@ -2615,31 +2974,32 @@ const RichEditorPane = ({
       setSaveState("idle");
     },
     onError: async (error) => {
-      const failure = classifyEditorSaveFailure(error);
-      if (failure.kind === "storage") {
+      if (error instanceof LocalDatabaseUnavailableError) {
         setStorageSaveError(true);
         setSaveConflictInfo(null);
         setSaveState("error");
         return;
       }
       setStorageSaveError(false);
+      const sourceError = error instanceof MemoSaveRequestError ? error.originalError : error;
+      const conflictInfo = getMemoSaveConflictInfo(sourceError);
 
-      if (failure.kind === "conflict") {
-        setSaveConflictInfo(failure.conflict);
+      if (conflictInfo) {
+        setSaveConflictInfo(conflictInfo);
         setSaveState("conflict");
         return;
       }
 
-      if (failure.kind === "queue") {
-        await queueMemoUpdate(failure.payload);
+      if (error instanceof MemoSaveRequestError && shouldQueueMemoSaveError(sourceError)) {
+        await queueMemoUpdate(error.payload);
         await localDb.drafts.put({
-          memoId: failure.payload.memoId,
-          title: failure.payload.title,
-          tagsText: failure.tagsText,
-          contentJson: failure.payload.contentJson,
+          memoId: error.payload.memoId,
+          title: error.payload.title,
+          tagsText: error.tagsText,
+          contentJson: error.payload.contentJson,
           updatedAt: new Date().toISOString(),
         });
-        removeEmergencyDraft(failure.payload.memoId);
+        removeEmergencyDraft(error.payload.memoId);
 
         setHasUnsavedChanges(false);
         setSaveConflictInfo(null);
@@ -3023,6 +3383,19 @@ const RichEditorPane = ({
     return () => window.clearTimeout(timer);
   }, [dirtyVersion, editor, hasUnsavedChanges, memo, mutateSave, saveMutationPending, saveState, useMobilePlainTextEditor]);
 
+  // Must stay above early returns so hook order never changes across loading/empty/editor states.
+  const saveConflictReason = useMemo(
+    () => (saveState === "conflict" ? formatMemoSaveConflictReason(t, saveConflictInfo) : null),
+    [saveConflictInfo, saveState, t],
+  );
+
+  useEffect(() => {
+    if (saveState !== "conflict") {
+      setConflictActionPending(null);
+      setConflictActionMessage(null);
+    }
+  }, [saveState]);
+
   const getLocalDraftMarkdown = useCallback(() => {
     if (useMobilePlainTextEditor) {
       return getMobilePlainTextValue();
@@ -3044,83 +3417,108 @@ const RichEditorPane = ({
     useMobilePlainTextEditor,
   ]);
 
-  const adoptCloudMemo = useCallback(async () => {
-    const currentMemo = memoRef.current;
-    if (!currentMemo) {
+  const handleCopyLocalDraft = useCallback(async () => {
+    if (conflictActionPending) {
       return;
     }
 
-    const { memo: remoteMemo } = await repository.adoptCloudMemo(currentMemo.id);
-    await onSaved(remoteMemo);
-
-    setHasUnsavedChanges(false);
-    setSaveConflictInfo(null);
-    setSaveState("idle");
-
-    const nextTitle = getEditableMemoTitle(remoteMemo.title);
-    const nextTagsText = remoteMemo.tags.join(", ");
-    const nextContent = resolveMemoContentDoc(remoteMemo.contentJson, remoteMemo.contentMarkdown);
-    const nextMarkdown = remoteMemo.contentMarkdown || docToMarkdown(nextContent);
-
-    memoRef.current = remoteMemo;
-    editSessionRef.current = null;
-    hydratedMemoIdRef.current = remoteMemo.id;
-    setHydratedEditorMemoId(remoteMemo.id);
-    editingMemoIdRef.current = remoteMemo.id;
-    appliedEditorSourceKeyRef.current = `memo:${remoteMemo.id}:${remoteMemo.revision}:${remoteMemo.updatedAt}:${remoteMemo.contentHash}:${nextTitle}:${nextTagsText}:${nextMarkdown}`;
-
-    setTitle(nextTitle);
-    setTagsText(nextTagsText);
-    setMobilePlainText(nextMarkdown);
-    setMarkdownSource(nextMarkdown);
-    markdownModeSnapshotRef.current = isMarkdownMode
-      ? createMarkdownModeSnapshot(remoteMemo.id, nextContent, nextMarkdown)
-      : null;
-    setMobilePlainTextElementValue(mobileTextAreaRef.current, nextMarkdown);
-
-    const currentEditor = editorRef.current;
-    if (isEditorReady(currentEditor)) {
-      hydratingRef.current = true;
-      try {
-        currentEditor.commands.setContent(nextContent);
-      } catch (err) {
-        console.error("Failed to apply cloud memo after conflict resolve:", err);
-        currentEditor.commands.setContent(markdownToDoc(nextMarkdown));
-      }
-      window.setTimeout(() => {
-        hydratingRef.current = false;
-      }, 0);
-    }
-
-    if (requiresLocalEditSession(remoteMemo)) {
-      editSessionRef.current = createLocalEditSession(remoteMemo);
-    } else {
-      void api.createMemoEditSession(remoteMemo.id).then((response) => {
-        if (editingMemoIdRef.current !== remoteMemo.id) return;
-        editSessionRef.current = response.editSession;
-      }).catch(() => {
-        if (editingMemoIdRef.current !== remoteMemo.id) return;
-        editSessionRef.current = createLocalEditSession(remoteMemo);
+    setConflictActionPending("copy");
+    setConflictActionMessage(null);
+    try {
+      const text = formatLocalDraftClipboardText({
+        title,
+        tags: parseTagsText(tagsText),
+        contentMarkdown: getLocalDraftMarkdown(),
       });
+      const copied = await copyTextToClipboard(text);
+      if (!copied) {
+        setConflictActionMessage(t("editor.saveState.conflictCopyDraftFailed"));
+        return;
+      }
+      setConflictActionMessage(t("editor.saveState.conflictCopyDraftDone"));
+      window.setTimeout(() => {
+        setConflictActionMessage((current) =>
+          current === t("editor.saveState.conflictCopyDraftDone") ? null : current
+        );
+      }, 2000);
+    } catch {
+      setConflictActionMessage(t("editor.saveState.conflictCopyDraftFailed"));
+    } finally {
+      setConflictActionPending(null);
+    }
+  }, [conflictActionPending, getLocalDraftMarkdown, t, tagsText, title]);
+
+  const handleAdoptCloudAndReload = useCallback(async () => {
+    const currentMemo = memoRef.current;
+    if (!currentMemo || conflictActionPending === "adopt") {
+      return;
     }
 
-    await queryClient.invalidateQueries({ queryKey: ["memo", remoteMemo.id] });
-  }, [isMarkdownMode, onSaved, queryClient, repository]);
+    setConflictActionPending("adopt");
+    setConflictActionMessage(null);
+    try {
+      const { memo: remoteMemo } = await repository.adoptCloudMemo(currentMemo.id);
+      await onSaved(remoteMemo);
 
-  const {
-    conflictActionMessage,
-    conflictActionPending,
-    handleAdoptCloudAndReload,
-    handleCopyLocalDraft,
-    saveConflictReason,
-  } = useEditorSaveConflictActions({
-    adoptCloudMemo,
-    getLocalDraftMarkdown,
-    saveConflictInfo,
-    saveState,
-    tagsText,
-    title,
-  });
+      setHasUnsavedChanges(false);
+      setSaveConflictInfo(null);
+      setSaveState("idle");
+      setConflictActionMessage(null);
+
+      const nextTitle = getEditableMemoTitle(remoteMemo.title);
+      const nextTagsText = remoteMemo.tags.join(", ");
+      const nextContent = resolveMemoContentDoc(remoteMemo.contentJson, remoteMemo.contentMarkdown);
+      const nextMarkdown = remoteMemo.contentMarkdown || docToMarkdown(nextContent);
+
+      memoRef.current = remoteMemo;
+      editSessionRef.current = null;
+      hydratedMemoIdRef.current = remoteMemo.id;
+      setHydratedEditorMemoId(remoteMemo.id);
+      editingMemoIdRef.current = remoteMemo.id;
+      appliedEditorSourceKeyRef.current = `memo:${remoteMemo.id}:${remoteMemo.revision}:${remoteMemo.updatedAt}:${remoteMemo.contentHash}:${nextTitle}:${nextTagsText}:${nextMarkdown}`;
+
+      setTitle(nextTitle);
+      setTagsText(nextTagsText);
+      setMobilePlainText(nextMarkdown);
+      setMarkdownSource(nextMarkdown);
+      markdownModeSnapshotRef.current = isMarkdownMode
+        ? createMarkdownModeSnapshot(remoteMemo.id, nextContent, nextMarkdown)
+        : null;
+      setMobilePlainTextElementValue(mobileTextAreaRef.current, nextMarkdown);
+
+      const currentEditor = editorRef.current;
+      if (isEditorReady(currentEditor)) {
+        hydratingRef.current = true;
+        try {
+          currentEditor.commands.setContent(nextContent);
+        } catch (err) {
+          console.error("Failed to apply cloud memo after conflict resolve:", err);
+          currentEditor.commands.setContent(markdownToDoc(nextMarkdown));
+        }
+        window.setTimeout(() => {
+          hydratingRef.current = false;
+        }, 0);
+      }
+
+      if (requiresLocalEditSession(remoteMemo)) {
+        editSessionRef.current = createLocalEditSession(remoteMemo);
+      } else {
+        void api.createMemoEditSession(remoteMemo.id).then((response) => {
+          if (editingMemoIdRef.current !== remoteMemo.id) return;
+          editSessionRef.current = response.editSession;
+        }).catch(() => {
+          if (editingMemoIdRef.current !== remoteMemo.id) return;
+          editSessionRef.current = createLocalEditSession(remoteMemo);
+        });
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ["memo", remoteMemo.id] });
+    } catch {
+      setConflictActionMessage(t("editor.saveState.conflictAdoptFailed"));
+    } finally {
+      setConflictActionPending(null);
+    }
+  }, [conflictActionPending, isMarkdownMode, onSaved, queryClient, repository, t]);
 
   if (isSelectionMode) {
     return (
@@ -3155,11 +3553,29 @@ const RichEditorPane = ({
     );
   }
 
-  const { saveLabel, saveStateClassName } = getEditorSaveChrome({
-    hasUnsavedChanges,
-    saveState,
-    t,
-  });
+  const saveLabel =
+    saveState === "saving"
+      ? t("editor.saveState.saving")
+      : saveState === "saved"
+        ? t("editor.saveState.saved")
+        : saveState === "queued"
+          ? t("editor.saveState.queued")
+          : saveState === "conflict"
+            ? t("editor.saveState.conflict")
+            : saveState === "error"
+              ? t("editor.saveState.error")
+              : hasUnsavedChanges
+                ? t("editor.saveState.unsaved")
+                : t("editor.saveState.saved");
+
+  const saveStateClassName =
+    saveState === "error" || saveState === "conflict"
+      ? "bg-rose-50 text-rose-700"
+      : saveState === "queued"
+        ? "bg-slate-50 text-slate-400"
+        : saveState === "saving" || hasUnsavedChanges
+          ? "bg-emerald-50 text-emerald-700"
+          : "bg-slate-100 text-slate-500";
 
   const imageUploadLabel =
     imageUploadState === "error"
@@ -3271,7 +3687,8 @@ const RichEditorPane = ({
         onBackToList();
       },
       onError: (error) => {
-        if (shouldLeaveEditorAfterSaveError(error)) {
+        const sourceError = error instanceof MemoSaveRequestError ? error.originalError : error;
+        if (error instanceof MemoSaveRequestError && shouldQueueMemoSaveError(sourceError)) {
           onMobileDefaultEditConsumed();
           onBackToList();
         }
@@ -3294,7 +3711,8 @@ const RichEditorPane = ({
         setMobileToolbarOpen(false);
       },
       onError: (error) => {
-        if (shouldLeaveEditorAfterSaveError(error)) {
+        const sourceError = error instanceof MemoSaveRequestError ? error.originalError : error;
+        if (error instanceof MemoSaveRequestError && shouldQueueMemoSaveError(sourceError)) {
           onMobileDefaultEditConsumed();
           setIsMobileEditing(false);
           setMobileToolbarOpen(false);

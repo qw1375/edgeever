@@ -5,7 +5,10 @@ import { Graph } from "@antv/x6";
 import Image from "@tiptap/extension-image";
 import CodeBlock from "@tiptap/extension-code-block";
 import Placeholder from "@tiptap/extension-placeholder";
+import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
 import { EditorContent, Extension, useEditor, useEditorState, type Editor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
 import { EdgeEverLink } from "@edgeever/shared/editor-link";
 import * as Clipboard from "expo-clipboard";
 import {
@@ -27,7 +30,7 @@ import {
   isAiSelectionSnapshotCurrent,
   markdownToDoc,
   MEMO_CONTENT_STYLE,
-  createEdgeEverDocumentExtensions,
+  MergeDivider,
   NativeAttachmentMetadata,
   normalizeAiSelectionReplacement,
   prepareNativeEditorContent,
@@ -766,22 +769,22 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
     // the Android bridge retry raced each other and could leave the WebView stuck.
     autofocus: false,
     extensions: [
-      ...createEdgeEverDocumentExtensions({
-        mathematics: createEdgeEverMathematics(),
-        starterKit: { codeBlock: false, link: false },
-        image: protectedImageExtension,
-        gallery: ImageGallery.extend({
-          addNodeView() { return createNativeImageGalleryView(() => props.locale); },
-        }),
-        pdf: false,
-        file: false,
-        pluginEmbed: false,
-        table: { table: { renderWrapper: true } },
-      }),
+      StarterKit.configure({ codeBlock: false, link: false }),
       EdgeEverLink.configure({ openOnClick: false }),
       NativeAttachmentMetadata,
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      MergeDivider,
+      ...createEdgeEverMathematics(),
       mermaidCodeBlockExtension,
+      ImageGallery.extend({
+        addNodeView() { return createNativeImageGalleryView(() => props.locale); },
+      }),
+      protectedImageExtension,
       searchHighlightExtension,
+      TableKit.configure({
+        table: { renderWrapper: true },
+      }),
       ...createNativeUnsupportedContentExtensions(),
       Placeholder.configure({
         placeholder: () => isViewerRef.current ? "" : getMobileEditorPlaceholder(props.locale),

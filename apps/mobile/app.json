@@ -75,7 +75,12 @@
         "expo-sharing",
         {
           "ios": {
-            "enabled": false
+            "enabled": true,
+            "activationRule": {
+              "supportsText": true,
+              "supportsWebPageWithMaxCount": 1,
+              "supportsWebUrlWithMaxCount": 1
+            }
           },
           "android": {
             "enabled": true,

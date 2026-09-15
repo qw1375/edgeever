@@ -29,7 +29,7 @@ import { isAllowedPrintPreviewUrl } from "./window-open-policy.mjs";
 import { showWindow } from "./window-visibility.mjs";
 import { trayIconPath } from "./tray-icon.mjs";
 import { writeRichClipboard } from "./clipboard-write.mjs";
-import { captureScreenToNote, screenshotImportIpcPayload, writeScreenshotTempPath } from "./screenshot-capture.mjs";
+import { captureInteractiveScreenshot, writeScreenshotTempPath } from "./screenshot-capture.mjs";
 import { LocalDataResetError, scheduleMacLocalDataReset } from "./local-data-reset.mjs";
 import { buildDesktopDiagnosticIssueUrl, normalizeDesktopDiagnostic } from "./desktop-diagnostics.mjs";
 import { createRendererStartupGuard } from "./renderer-startup-guard.mjs";
@@ -519,20 +519,17 @@ const flushPendingMarkdownImport = () => {
 };
 
 const sendScreenshotImport = (payload) => {
-  const ipcPayload = screenshotImportIpcPayload(payload);
-  if (!ipcPayload.bytes.byteLength) return;
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading() || !rendererReady) {
-    pendingScreenshotImport = ipcPayload;
+    pendingScreenshotImport = payload;
     return;
   }
-  mainWindow.webContents.send("desktop:import-screenshot", ipcPayload);
+  mainWindow.webContents.send("desktop:import-screenshot", payload);
 };
 
 const flushPendingScreenshotImport = () => {
   if (!pendingScreenshotImport || !rendererReady || !mainWindow || mainWindow.isDestroyed()) return;
   const payload = pendingScreenshotImport;
   pendingScreenshotImport = null;
-  if (!payload.bytes?.byteLength) return;
   mainWindow.webContents.send("desktop:import-screenshot", payload);
 };
 
@@ -549,12 +546,16 @@ const captureScreenshotToNote = async () => {
     if (process.platform === "darwin") app.hide();
     else if (wasVisible) mainWindow.hide();
     await new Promise((resolve) => setTimeout(resolve, 250));
-    const captured = await captureScreenToNote({
+    const captured = await captureInteractiveScreenshot({
       platform: process.platform,
       locale: app.getLocale(),
       outputPath: process.platform === "darwin" ? writeScreenshotTempPath(app.getPath("temp")) : undefined,
+      BrowserWindow,
       desktopCapturer,
       screen,
+      ipcMain,
+      overlayHtmlPath: join(currentDirectory, "../screenshot/overlay.html"),
+      overlayPreloadPath: join(currentDirectory, "../screenshot/overlay-preload.cjs"),
     });
     if (!captured) {
       if (wasVisible) revealWindow();

@@ -1,7 +1,7 @@
 # Deploy EdgeEver with Docker
 
 EdgeEver uses the same web application, Hono routes, services, authentication,
-MCP implementation, and append-only migrations on Cloudflare
+OpenAPI document, MCP implementation, and append-only migrations on Cloudflare
 and Docker. Only the thin runtime and infrastructure adapters differ: Docker
 uses Bun with SQLite and local files (or S3-compatible object storage), while
 Cloudflare uses Workers with D1 and R2.
